@@ -93,7 +93,7 @@
     <h1>SKYLANE</h1>
     <p>하늘은 점점 붐비고, 활주로는 늘 부족합니다. 침착하게 길을 그려주세요.</p>
     <ul class="how">
-      <li><span class="n">1</span><div>비행기에서 <b>드래그</b>해 비행 경로를 그립니다<br><small>경로를 다시 그리면 언제든 덮어써요</small></div></li>
+      <li><span class="n">1</span><div>비행기에서 <b>드래그</b>해 비행 경로를 그립니다<br><small>경로 끝점(또는 경로 위 아무 점)을 잡으면 거기서부터 이어 그려요</small></div></li>
       <li><span class="n">2</span><div><b>같은 색</b> 활주로에 <b>끝단에서 방향을 맞춰</b> 진입하면 착륙<br><small>활주로가 밝게 빛나면 착륙 경로가 잡힌 거예요</small></div></li>
       <li><span class="n">3</span><div>항공기끼리 <b>충돌</b>하거나 <b>연료</b>가 바닥나면 끝<br><small>착륙이 쌓이면 업그레이드를 고를 수 있어요</small></div></li>
     </ul>
@@ -581,6 +581,12 @@ function render(){
     const e = p.path[p.path.length - 1];
     ctx.fillStyle = hexA(p.color, 0.9);
     ctx.beginPath(); ctx.arc(e.x, e.y, 3.2 * S, 0, TAU); ctx.fill();
+    // grab handle on the tip: drag it to keep drawing
+    if (!(drag && drag.p === p)){
+      ctx.strokeStyle = hexA(p.color, 0.45 + 0.25 * Math.sin(G.t * 5));
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(e.x, e.y, 8 * S, 0, TAU); ctx.stroke();
+    }
     ctx.restore();
   }
 
@@ -779,6 +785,26 @@ cv.addEventListener('pointerdown', e => {
     if (p.state !== 'fly') continue;
     const d = dist(p, m);
     if (d < bd){ bd = d; best = p; }
+  }
+  // A point on an existing path (its tip first) lets you continue from there
+  let hitP = null, hitI = -1, hd = 22 * S;
+  for (const p of G.planes){
+    if (p.state !== 'fly' || !p.path.length) continue;
+    const n = p.path.length;
+    for (let i = n - 1; i >= 0; i--){
+      const d = dist(p.path[i], m) - (i === n - 1 ? 8 * S : 0);
+      if (d < hd){ hd = d; hitP = p; hitI = i; }
+    }
+  }
+  if (hitP && (!best || hd < bd)){
+    hitP.path.length = hitI + 1;
+    const q = hitP.path[hitI];
+    drag = { p: hitP, last: { x: q.x, y: q.y }, hint: null };
+    Snd.pick();
+    G.fx.push({ x: q.x, y: q.y, t: 0, color: hitP.color });
+    try { cv.setPointerCapture(e.pointerId); } catch {}
+    fadeHint();
+    return;
   }
   if (!best) return;
   drag = { p: best, last: { x: best.x, y: best.y }, hint: null };
