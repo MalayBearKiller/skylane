@@ -93,7 +93,7 @@
     <h1>SKYLANE</h1>
     <p>하늘은 점점 붐비고, 활주로는 늘 부족합니다. 침착하게 길을 그려주세요.</p>
     <ul class="how">
-      <li><span class="n">1</span><div>비행기에서 <b>드래그</b>해 비행 경로를 그립니다<br><small>경로 끝점(또는 경로 위 아무 점)을 잡으면 거기서부터 이어 그려요</small></div></li>
+      <li><span class="n">1</span><div>비행기에서 <b>드래그</b>해 비행 경로를 그립니다<br><small>비행기는 급히 꺾지 못해 경로가 곡선으로 그려져요. 끝점이나 경로 위 점을 잡으면 이어 그려요</small></div></li>
       <li><span class="n">2</span><div><b>같은 색</b> 활주로에 <b>끝단에서 방향을 맞춰</b> 진입하면 착륙<br><small>활주로가 밝게 빛나면 착륙 경로가 잡힌 거예요</small></div></li>
       <li><span class="n">3</span><div>항공기끼리 <b>충돌</b>하거나 <b>연료</b>가 바닥나면 끝<br><small>착륙이 쌓이면 업그레이드를 고를 수 있어요</small></div></li>
     </ul>
@@ -143,6 +143,8 @@ const $ = id => document.getElementById(id);
 
 const COLORS = ['#ffb547', '#4fd6e8', '#ff7a8a', '#a8e05f'];
 const DAY_LEN = 90;           // seconds of game time per day
+const BASE_SPEED = 32;        // px/s at S=1
+const TURN_R = 38;            // minimum turn radius, px at S=1
 const TAU = Math.PI * 2;
 
 let W = 0, H = 0, S = 1, DPR = 1;
@@ -418,7 +420,8 @@ function update(dt){
   G.spawnT -= dt;
   if (G.spawnT <= 0){ spawn(); G.spawnT = spawnInterval(); }
 
-  const sp = 42 * S * G.speedMul;
+  const sp = BASE_SPEED * S * G.speedMul;
+  const maxTurn = sp / (TURN_R * S) * dt; // radians this frame at the tightest radius
 
   for (let i = G.planes.length - 1; i >= 0; i--){
     const p = G.planes[i];
@@ -453,12 +456,18 @@ function update(dt){
     if (p.fuel <= 0){ return gameOver(`${p.code} 편이 연료가 바닥났습니다`, p); }
     if (!p.lowWarned && p.fuel / p.fuelMax < 0.25){ p.lowWarned = true; Snd.fuel(); }
 
+    // drop points the plane has already flown past (it kept moving while you drew)
+    while (p.path.length > 1){
+      const q = p.path[0], dx = q.x - p.x, dy = q.y - p.y;
+      if (dx * Math.cos(p.h) + dy * Math.sin(p.h) < 0 && Math.hypot(dx, dy) < 30 * S) p.path.shift();
+      else break;
+    }
     if (p.path.length){
       let rem = sp * dt;
       while (rem > 0 && p.path.length){
         const q = p.path[0];
         const dx = q.x - p.x, dy = q.y - p.y, d = Math.hypot(dx, dy);
-        if (d > 0.001) p.h = turnToward(p.h, Math.atan2(dy, dx), Math.max(0.35, 9 * dt));
+        if (d > 0.001) p.h = turnToward(p.h, Math.atan2(dy, dx), maxTurn * 1.5);
         if (d <= rem){ p.x = q.x; p.y = q.y; rem -= d; p.path.shift(); }
         else { p.x += dx / d * rem; p.y += dy / d * rem; rem = 0; }
       }
@@ -466,7 +475,7 @@ function update(dt){
       if (p.entered){
         const pad = 12 * S;
         if (p.x < pad || p.x > W - pad || p.y < pad || p.y > H - pad){
-          p.h = turnToward(p.h, Math.atan2(H / 2 - p.y, W / 2 - p.x), 1.8 * dt);
+          p.h = turnToward(p.h, Math.atan2(H / 2 - p.y, W / 2 - p.x), maxTurn);
         }
       }
       p.x += Math.cos(p.h) * sp * dt;
@@ -799,7 +808,9 @@ cv.addEventListener('pointerdown', e => {
   if (hitP && (!best || hd < bd)){
     hitP.path.length = hitI + 1;
     const q = hitP.path[hitI];
-    drag = { p: hitP, last: { x: q.x, y: q.y }, hint: null };
+    const pv = hitI > 0 ? hitP.path[hitI - 1] : hitP;
+    const h0 = dist(pv, q) > 0.01 ? Math.atan2(q.y - pv.y, q.x - pv.x) : hitP.h;
+    drag = { p: hitP, last: { x: q.x, y: q.y }, h: h0, hint: null };
     Snd.pick();
     G.fx.push({ x: q.x, y: q.y, t: 0, color: hitP.color });
     try { cv.setPointerCapture(e.pointerId); } catch {}
@@ -807,7 +818,7 @@ cv.addEventListener('pointerdown', e => {
     return;
   }
   if (!best) return;
-  drag = { p: best, last: { x: best.x, y: best.y }, hint: null };
+  drag = { p: best, last: { x: best.x, y: best.y }, h: best.h, hint: null };
   best.path = [];
   Snd.pick();
   G.fx.push({ x: best.x, y: best.y, t: 0, color: best.color });
@@ -820,20 +831,30 @@ cv.addEventListener('pointermove', e => {
   const p = drag.p;
   if (p.state !== 'fly' || !G.planes.includes(p)){ drag = null; return; }
   const m = pt(e);
-  const step = 6 * S;
-  let d = dist(drag.last, m);
-  if (d < step) return;
+  const step = 6 * S, R = TURN_R * S, maxTurn = step / R;
+  // the tip trails the cursor on a short leash; chasing it exactly makes the
+  // tip overshoot and loop back whenever the cursor sits just off to one side
+  const lead = R * 0.7;
+  if (dist(drag.last, m) < lead) return;
   // Don't leave a tail behind the plane: path starts where the plane is
   if (!p.path.length && dist(p, m) < 14 * S) return;
-  const n = Math.floor(d / step);
-  for (let i = 1; i <= n; i++){
-    const q = {
-      x: drag.last.x + (m.x - drag.last.x) * i / n,
-      y: drag.last.y + (m.y - drag.last.y) * i / n,
-    };
-    const prev = p.path.length ? p.path[p.path.length - 1] : { x: p.x, y: p.y };
-    const h = Math.atan2(q.y - prev.y, q.x - prev.x);
+  // Grow the path from its tip toward the cursor like a plane would fly it:
+  // heading changes at most step/R per point, so the curve never turns
+  // tighter than the minimum radius.
+  let tip = drag.last, h = drag.h;
+  const cap = Math.ceil((dist(tip, m) + TAU * R) / step);
+  for (let i = 0; i < cap; i++){
+    if (dist(tip, m) < lead) break;
+    const want = Math.atan2(m.y - tip.y, m.x - tip.x);
+    const side = Math.sign(wrap(want - h)) || 1;
+    // centre of the tightest turn toward the cursor; a cursor inside that
+    // circle can't be reached yet, so wait until the drag carries it out
+    const cx = tip.x - Math.sin(h) * R * side, cy = tip.y + Math.cos(h) * R * side;
+    if (Math.hypot(m.x - cx, m.y - cy) < R) break;
+    h = turnToward(h, want, maxTurn);
+    const q = { x: tip.x + Math.cos(h) * step, y: tip.y + Math.sin(h) * step };
     p.path.push(q);
+    tip = q;
     const hit = landingCheck(q.x, q.y, h, p.color);
     if (hit){
       // snap onto the centerline and finish this path
@@ -847,16 +868,14 @@ cv.addEventListener('pointermove', e => {
       hit.r.flash = 0.8;
       Snd.snap();
       setTimeout(() => { if (drag && drag.p === p) drag = null; }, 120);
-      drag.last = m;
       drag.done = true;
       break;
     }
   }
   if (drag && !drag.done){
-    drag.last = m;
+    drag.last = tip; drag.h = h;
     // preview: would the current tip land?
-    const tip = p.path[p.path.length - 1], pr = p.path[p.path.length - 2] || p;
-    drag.hint = tip ? landingCheck(tip.x, tip.y, Math.atan2(tip.y - pr.y, tip.x - pr.x), p.color) : null;
+    drag.hint = landingCheck(tip.x, tip.y, h, p.color);
   }
 });
 const endDrag = () => { if (drag && !drag.done) drag = null; };
