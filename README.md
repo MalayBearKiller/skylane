@@ -2,6 +2,8 @@
 
 브라우저에서 바로 하는 미니멀 항공 관제 게임. 빌드도, 의존성도 없이 `index.html` 하나로 돌아갑니다.
 
+**▶ 플레이: https://malaybearkiller.github.io/skylane/**
+
 ## 실행
 
 ```bash
